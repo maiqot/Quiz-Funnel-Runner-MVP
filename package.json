@@ -1,0 +1,34 @@
+{
+  "name": "quiz-funnel-runner-mvp-",
+  "version": "1.0.0",
+  "description": "CLI runner for quiz funnels with mobile emulation and screenshots",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "dev:headful": "HEADFUL=true tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "check": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/maiqot/Quiz-Funnel-Runner-MVP-.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/maiqot/Quiz-Funnel-Runner-MVP-/issues"
+  },
+  "homepage": "https://github.com/maiqot/Quiz-Funnel-Runner-MVP-#readme",
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "playwright": "^1.58.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
