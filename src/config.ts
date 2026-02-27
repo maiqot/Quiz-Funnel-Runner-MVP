@@ -1,6 +1,9 @@
 export const FUNNEL_URLS: string[] = [
   "https://coursiv.io/dynamic?prc_id=1069",
+  "https://coursiv.io/dynamic",
   "https://quiz.fitme.expert/intro-111",
+  "https://madmuscles.com/funnel/default-uni-soft-new/step-one",
+  "https://dance-bit.com/welcomeBellyRef",
 ]; // Можно добавить сразу несколько ссылок для тестирования в кавычках через запятую
 
 export const RUN_CONFIG = {

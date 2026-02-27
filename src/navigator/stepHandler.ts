@@ -237,6 +237,12 @@ async function clickQuestionCta(page: Page): Promise<boolean> {
 
 async function runEmailSubmitChain(page: Page): Promise<string[]> {
   const messages: string[] = [];
+  const getSnapshot = async (): Promise<string> => {
+    const html = await page.content().catch(() => "");
+    return `${page.url()}|${html.length}`;
+  };
+
+  const beforeSubmitSnapshot = await getSnapshot();
   const email = page.locator("input[type='email'], input[placeholder*='email' i]").first();
   if ((await email.count()) > 0 && (await email.isVisible().catch(() => false))) {
     await email.scrollIntoViewIfNeeded();
@@ -247,7 +253,13 @@ async function runEmailSubmitChain(page: Page): Promise<string[]> {
     await page.waitForTimeout(300);
     await page.keyboard.press("Enter").catch(() => undefined);
     messages.push("Triggered blur + Enter.");
-    await page.waitForTimeout(500);
+    await page.waitForTimeout(1_000);
+  }
+
+  const afterEnterSnapshot = await getSnapshot();
+  if (afterEnterSnapshot !== beforeSubmitSnapshot) {
+    messages.push("Transition detected after Enter.");
+    return messages;
   }
 
   // Шаг 8: attempt submit button click
@@ -258,7 +270,12 @@ async function runEmailSubmitChain(page: Page): Promise<string[]> {
   if ((await submitButton.count()) > 0 && (await submitButton.isVisible().catch(() => false))) {
     if (await clickLocator(submitButton)) {
       messages.push("Clicked email submit button.");
-      return messages;
+      await page.waitForTimeout(1_000);
+      const afterCtaSnapshot = await getSnapshot();
+      if (afterCtaSnapshot !== beforeSubmitSnapshot) {
+        messages.push("Transition detected after email CTA click.");
+        return messages;
+      }
     }
   }
 
@@ -266,22 +283,24 @@ async function runEmailSubmitChain(page: Page): Promise<string[]> {
   if ((await genericSubmit.count()) > 0 && (await genericSubmit.isVisible().catch(() => false))) {
     if (await clickLocator(genericSubmit)) {
       messages.push("Clicked generic submit control.");
-      return messages;
+      await page.waitForTimeout(1_000);
+      const afterGenericSubmitSnapshot = await getSnapshot();
+      if (afterGenericSubmitSnapshot !== beforeSubmitSnapshot) {
+        messages.push("Transition detected after generic submit click.");
+        return messages;
+      }
     }
   }
 
   // Шаг 8: fallback — JS form.submit()
-  const submittedByJs = await page
-    .locator("form")
-    .first()
-    .evaluate((form) => {
-      if (form instanceof HTMLFormElement) {
-        form.submit();
-        return true;
-      }
-      return false;
-    })
-    .catch(() => false);
+  const submittedByJs = await page.evaluate(() => {
+    const form = document.querySelector("form");
+    if (form instanceof HTMLFormElement) {
+      form.submit();
+      return true;
+    }
+    return false;
+  }).catch(() => false);
   if (submittedByJs) {
     messages.push("Submitted form via JS fallback.");
   }
@@ -290,69 +309,174 @@ async function runEmailSubmitChain(page: Page): Promise<string[]> {
 }
 
 /**
- * Click a radio/checkbox input AND its associated label/parent container.
- * Many quiz funnels attach event listeners to the label or wrapper div, not the input.
+ * Try known email hints when explicit input[type=email] is missing.
+ */
+async function fillEmailByHints(page: Page): Promise<boolean> {
+  const emailLike = page
+    .locator(
+      "input[name*='email' i], input[placeholder*='email' i], input[placeholder*='e-mail' i], input[aria-label*='email' i]",
+    )
+    .first();
+  if ((await emailLike.count()) === 0 || !(await emailLike.isVisible().catch(() => false))) {
+    return false;
+  }
+  try {
+    await emailLike.fill(INPUT_DEFAULTS.email);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function submitEmailStep(page: Page): Promise<string[]> {
+  const messages = await runEmailSubmitChain(page);
+  const explicitEmail = page.locator("input[type='email']").first();
+  if ((await explicitEmail.count()) === 0) {
+    const filledByHints = await fillEmailByHints(page);
+    if (filledByHints) {
+      messages.push("Filled email-like input by descriptor hints.");
+      await page.keyboard.press("Tab").catch(() => undefined);
+      await page.keyboard.press("Enter").catch(() => undefined);
+    }
+  }
+  return messages;
+}
+
+const SMART_KEYWORDS = [
+  "personal",
+  "custom",
+  "plan",
+  "result",
+  "my",
+  "recommend",
+  "tailored",
+  "detailed",
+  "unlock",
+  "see",
+  "show",
+];
+
+/**
+ * Retrieve the human-readable label text for a radio/checkbox input element.
+ * Checks explicit <label for=id>, wrapping <label>, and closest visible text ancestor.
+ */
+async function getOptionLabelText(
+  page: Page,
+  locator: ReturnType<Page["locator"]>,
+): Promise<string> {
+  return locator
+    .evaluate((el) => {
+      if (!(el instanceof HTMLElement)) return "";
+      const id = el.id;
+      if (id) {
+        const lbl = document.querySelector(`label[for="${id}"]`);
+        if (lbl) return (lbl as HTMLElement).innerText.toLowerCase();
+      }
+      const wrapping = el.closest("label");
+      if (wrapping) return (wrapping as HTMLElement).innerText.toLowerCase();
+      // Walk up to find nearest element with visible text
+      let cur: HTMLElement | null = el.parentElement;
+      for (let d = 0; cur && d < 4; d += 1, cur = cur.parentElement) {
+        const text = (cur.textContent || "").trim();
+        if (text.length > 0 && text.length < 120) return text.toLowerCase();
+      }
+      return "";
+    })
+    .catch(() => "");
+}
+
+/**
+ * SMART radio/checkbox click.
+ *
+ * Priority: smart-keyword match → second option → first option.
+ * Clicking strategy: label[for=id] → clickable parent → input itself.
  */
 async function clickOptionWithLabel(page: Page): Promise<{ clicked: boolean; messages: string[] }> {
   const messages: string[] = [];
-  const selectors = ["input[type='radio']", "input[type='checkbox']", "[role='radio']", "[role='checkbox']"];
+  const allInputs = page.locator(
+    "input[type='radio']:visible, input[type='checkbox']:visible, [role='radio']:visible, [role='checkbox']:visible",
+  );
+  const total = await allInputs.count();
+  if (total === 0) return { clicked: false, messages };
 
-  for (const selector of selectors) {
-    const inputs = page.locator(selector);
-    const count = await inputs.count();
-    if (count === 0) continue;
+  // --- Collect candidate indices with their label texts ---
+  const candidates: Array<{ index: number; text: string }> = [];
+  for (let i = 0; i < total && i < 20; i += 1) {
+    const text = await getOptionLabelText(page, allInputs.nth(i));
+    candidates.push({ index: i, text });
+  }
 
-    const input = inputs.first();
-    if (!(await input.isVisible().catch(() => false))) continue;
+  // --- SMART selection ---
+  let chosenIndex: number | null = null;
 
-    // Strategy 1: click the input's <label> (via for= or wrapping)
-    const inputId = await input.getAttribute("id").catch(() => null);
-    if (inputId) {
-      const label = page.locator(`label[for='${inputId}']`).first();
-      if ((await label.count()) > 0 && (await label.isVisible().catch(() => false))) {
-        if (await clickLocator(label)) {
-          messages.push("Clicked label for first option.");
-          return { clicked: true, messages };
-        }
+  for (const { index, text } of candidates) {
+    if (SMART_KEYWORDS.some((k) => text.includes(k))) {
+      chosenIndex = index;
+      messages.push(`SMART: picked option ${index} by keyword match: "${text.slice(0, 60)}"`);
+      break;
+    }
+  }
+
+  if (chosenIndex === null && candidates.length >= 2) {
+    chosenIndex = candidates[1].index;
+    messages.push(`SMART: no keyword match, picked second option (index ${chosenIndex}).`);
+  }
+
+  if (chosenIndex === null && candidates.length >= 1) {
+    chosenIndex = candidates[0].index;
+    messages.push(`SMART: single option, picked first (index ${chosenIndex}).`);
+  }
+
+  if (chosenIndex === null) return { clicked: false, messages };
+
+  const chosen = allInputs.nth(chosenIndex);
+
+  // --- Click with the same multi-strategy approach ---
+  const inputId = await chosen.getAttribute("id").catch(() => null);
+  if (inputId) {
+    const label = page.locator(`label[for='${inputId}']`).first();
+    if ((await label.count()) > 0 && (await label.isVisible().catch(() => false))) {
+      if (await clickLocator(label)) {
+        messages.push("Clicked label for chosen option.");
+        return { clicked: true, messages };
       }
     }
+  }
 
-    // Strategy 2: click the closest clickable parent container
-    const parentClicked = await input.evaluate((el) => {
-      let current: HTMLElement | null = el.parentElement;
-      for (let depth = 0; current && depth < 5; depth += 1) {
-        const style = window.getComputedStyle(current);
-        if (
-          style.cursor === "pointer" ||
-          current.tagName === "LABEL" ||
-          current.getAttribute("role") === "option" ||
-          current.onclick != null
-        ) {
-          current.click();
-          return true;
-        }
-        current = current.parentElement;
+  const parentClicked = await chosen.evaluate((el) => {
+    let current: HTMLElement | null = el.parentElement;
+    for (let depth = 0; current && depth < 5; depth += 1) {
+      const style = window.getComputedStyle(current);
+      if (
+        style.cursor === "pointer" ||
+        current.tagName === "LABEL" ||
+        current.getAttribute("role") === "option" ||
+        current.onclick != null
+      ) {
+        current.click();
+        return true;
       }
-      return false;
-    });
-    if (parentClicked) {
-      messages.push("Clicked parent container of first option.");
-      return { clicked: true, messages };
+      current = current.parentElement;
     }
+    return false;
+  });
+  if (parentClicked) {
+    messages.push("Clicked parent container of chosen option.");
+    return { clicked: true, messages };
+  }
 
-    // Strategy 3: just click the input itself
-    if (await clickLocator(input)) {
-      messages.push("Clicked first radio/checkbox input.");
-      return { clicked: true, messages };
-    }
+  if (await clickLocator(chosen)) {
+    messages.push("Clicked chosen radio/checkbox input directly.");
+    return { clicked: true, messages };
   }
 
   return { clicked: false, messages };
 }
 
 /**
- * Click the first option-like button on the page (for button-based question screens).
- * Filters out cookie/nav buttons.
+ * SMART button-based question click.
+ * Collects all option-like visible buttons, applies SMART_KEYWORDS selection,
+ * then falls back to second → first option.
  */
 async function clickFirstOptionButton(page: Page): Promise<{ clicked: boolean; messages: string[] }> {
   const messages: string[] = [];
@@ -360,27 +484,55 @@ async function clickFirstOptionButton(page: Page): Promise<{ clicked: boolean; m
   const buttons = page.locator("button:visible, [role='button']:visible");
   const count = await buttons.count();
 
+  // Collect candidates (button index + text)
+  const candidates: Array<{ index: number; text: string }> = [];
   for (let i = 0; i < count && i < 20; i += 1) {
-    const btn = buttons.nth(i);
-    const text = (await btn.innerText().catch(() => "")).trim();
-    if (text.length > 0 && text.length < 40 && !navCta.test(text)) {
-      if (await clickLocator(btn)) {
-        messages.push(`Clicked option button: "${text}".`);
-        return { clicked: true, messages };
-      }
+    const text = (await buttons.nth(i).innerText().catch(() => "")).trim();
+    if (text.length > 0 && text.length < 60 && !navCta.test(text)) {
+      candidates.push({ index: i, text });
     }
+  }
+  if (candidates.length === 0) return { clicked: false, messages };
+
+  // SMART selection
+  let chosen: { index: number; text: string } | null = null;
+  for (const c of candidates) {
+    if (SMART_KEYWORDS.some((k) => c.text.toLowerCase().includes(k))) {
+      chosen = c;
+      messages.push(`SMART: picked button by keyword: "${c.text.slice(0, 60)}"`);
+      break;
+    }
+  }
+  if (!chosen && candidates.length >= 2) {
+    chosen = candidates[1];
+    messages.push(`SMART: no keyword match, picked second button: "${chosen.text.slice(0, 60)}"`);
+  }
+  if (!chosen) {
+    chosen = candidates[0];
+    messages.push(`SMART: single candidate, picked first button: "${chosen.text.slice(0, 60)}"`);
+  }
+
+  if (await clickLocator(buttons.nth(chosen.index))) {
+    messages.push(`Clicked option button: "${chosen.text}".`);
+    return { clicked: true, messages };
   }
   return { clicked: false, messages };
 }
 
 /**
- * Click the first clickable card/div option on the page (for card-based quiz screens).
+ * SMART card-based question click.
+ * Collects all visible clickable card divs, applies SMART_KEYWORDS selection,
+ * then falls back to second → first card.
  */
 async function clickFirstOptionCard(page: Page): Promise<{ clicked: boolean; messages: string[] }> {
   const messages: string[] = [];
-  const result = await page.evaluate(() => {
+
+  // Collect all candidate cards in-page
+  const cards = await page.evaluate((smartKeywords: string[]) => {
     const seen = new Set<string>();
+    const results: Array<{ text: string; index: number }> = [];
     const els = document.querySelectorAll("*");
+    let idx = 0;
     for (const el of Array.from(els)) {
       if (!(el instanceof HTMLElement)) continue;
       const style = window.getComputedStyle(el);
@@ -390,16 +542,52 @@ async function clickFirstOptionCard(page: Page): Promise<{ clicked: boolean; mes
       if (text.length > 0 && text.length < 60 && !seen.has(text)) {
         const rect = el.getBoundingClientRect();
         if (rect.width > 40 && rect.height > 30) {
-          el.click();
-          return text;
+          seen.add(text);
+          results.push({ text, index: idx });
+          idx += 1;
+        }
+      }
+    }
+
+    // SMART selection
+    let chosen: { text: string; index: number } | null = null;
+    for (const c of results) {
+      if (smartKeywords.some((k) => c.text.toLowerCase().includes(k))) {
+        chosen = c;
+        break;
+      }
+    }
+    if (!chosen && results.length >= 2) chosen = results[1];
+    if (!chosen && results.length >= 1) chosen = results[0];
+    if (!chosen) return null;
+
+    // Re-find and click the element
+    const seenAgain = new Set<string>();
+    let counter = 0;
+    for (const el of Array.from(document.querySelectorAll("*"))) {
+      if (!(el instanceof HTMLElement)) continue;
+      const style = window.getComputedStyle(el);
+      if (style.cursor !== "pointer") continue;
+      if (["BUTTON", "A", "INPUT", "SELECT", "LABEL"].includes(el.tagName)) continue;
+      const t = (el.textContent || "").trim();
+      if (t.length > 0 && t.length < 60 && !seenAgain.has(t)) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 40 && rect.height > 30) {
+          seenAgain.add(t);
+          if (counter === chosen.index) {
+            el.click();
+            return { text: t, smart: smartKeywords.some((k) => t.toLowerCase().includes(k)) };
+          }
+          counter += 1;
         }
       }
     }
     return null;
-  });
+  }, SMART_KEYWORDS);
 
-  if (result) {
-    messages.push(`Clicked option card: "${result}".`);
+  if (cards) {
+    const label = cards.smart ? `SMART keyword match` : `fallback`;
+    messages.push(`Clicked option card (${label}): "${cards.text}".`);
     return { clicked: true, messages };
   }
   return { clicked: false, messages };
@@ -541,7 +729,7 @@ export async function handleStepAction(page: Page, type: ScreenType): Promise<Ac
     }
 
     case "email": {
-      const emailMessages = await runEmailSubmitChain(page);
+      const emailMessages = await submitEmailStep(page);
       messages.push(...emailMessages);
 
       // Check consent/privacy checkboxes (required on many email screens).

@@ -53,19 +53,54 @@ async function countClickableOptionCards(page: Page): Promise<number> {
 export async function classifyScreen(page: Page, step: number): Promise<ScreenClassification> {
   const content = (await page.content()).toLowerCase();
 
-  // --- Email: checked FIRST so aggressive paywall never shadows an email screen ---
-  const emailInputs = await page
-    .locator(
-      'input[type="email"], input[name*="email" i], input[id*="email" i], input[placeholder*="email" i], input[placeholder*="e-mail" i], input[aria-label*="email" i], input[autocomplete*="email" i]',
-    )
+  // --- Paywall: broader pricing heuristic + purchase CTA ---
+  const emailInput = await page.$('input[type="email"]');
+  const priceMatches = content.match(/(\$|€|£|usd|eur)\s*\d+/gi) ?? [];
+  const paywallKeywords =
+    /(subscribe|buy now|purchase|continue to payment|start my plan|get my plan|unlock|try now|start plan|see your plan|show my plan|get plan|get access)/i;
+  const paywallCtaCount = await page
+    .locator("button, [role='button'], a, input[type='submit']")
+    .filter({ hasText: paywallKeywords })
     .count();
+  const hasPaywallText =
+    /(subscription|per\s*month|your plan|unlock your plan|choose your plan|personalized plan|show my plan|see your plan|get your plan|premium|trial)/i.test(
+      content,
+    );
+
+  // Aggressive stage-aware paywall: step >= 10 with price + broad CTA
+  const aggressivePaywall =
+    step >= 10 &&
+    priceMatches.length >= 1 &&
+    paywallCtaCount >= 1 &&
+    /(start|subscribe|buy|continue|unlock|get access)/i.test(content);
+
+  // Late-stage soft paywall: step >= 20 with subscription keywords AND at least one paywall CTA.
+  // Requires paywallCtaCount >= 1 to avoid false positives on "building your plan" info screens.
+  const lateStageSoftPaywall =
+    step >= 20 &&
+    paywallCtaCount >= 1 &&
+    /(subscription|per month|your plan|choose your plan|unlock your plan|premium|trial)/i.test(content);
+
+  if (
+    step > 1 &&
+    !emailInput &&
+    ((paywallCtaCount >= 1 && (priceMatches.length >= 2 || hasPaywallText)) ||
+      aggressivePaywall ||
+      lateStageSoftPaywall)
+  ) {
+    return { type: "paywall", reason: `Found ${priceMatches.length} price(s), billing terms, and paywall CTA.` };
+  }
+
+  // --- Email: check after paywall, but before generic input ---
+  if (emailInput) {
+    return {
+      type: "email",
+      reason: "Detected input[type=email].",
+    };
+  }
   const genericTextInputs = await page
     .locator('input[type="text"]:visible, input:not([type]):visible, textarea:visible')
     .count();
-  const hasEmailTextHint =
-    /(email address|e-mail address|enter your email|type your email|your email|where should we send|send.*email)/i.test(
-      content,
-    );
   const descriptorEmailMatches = await page.evaluate(() => {
     const inputs = Array.from(document.querySelectorAll("input, textarea"));
     let matches = 0;
@@ -102,55 +137,24 @@ export async function classifyScreen(page: Page, step: number): Promise<ScreenCl
       const descriptor = [
         element.getAttribute("placeholder") ?? "",
         element.getAttribute("name") ?? "",
-        element.getAttribute("id") ?? "",
-        element.getAttribute("aria-label") ?? "",
-        element.getAttribute("autocomplete") ?? "",
       ]
         .join(" ")
         .toLowerCase();
 
-      if (/(^|\b)e-?mail(\b|$)/i.test(descriptor)) {
+      if (
+        /(e-?mail|your email|enter your email)/i.test(descriptor)
+      ) {
         matches += 1;
       }
     }
     return matches;
   });
-  if (emailInputs > 0 || descriptorEmailMatches > 0 || (hasEmailTextHint && genericTextInputs >= 1)) {
-    return { type: "email", reason: "Detected email input field." };
-  }
-
-  // --- Paywall: broader pricing heuristic + purchase CTA ---
-  const priceMatches = content.match(/(\$|€|£|usd|eur)\s*\d+/gi) ?? [];
-  const paywallKeywords =
-    /(subscribe|buy now|purchase|continue to payment|start my plan|get my plan|unlock|try now|start plan|see your plan|show my plan|get plan|get access)/i;
-  const paywallCtaCount = await page
-    .locator("button, [role='button'], a, input[type='submit']")
-    .filter({ hasText: paywallKeywords })
-    .count();
-  const hasPaywallText =
-    /(subscription|per\s*month|your plan|unlock your plan|choose your plan|personalized plan|show my plan|see your plan|get your plan|premium|trial)/i.test(
+  const hasEmailTextHint =
+    /(email address|e-mail address|enter your email|type your email|your email|where should we send|send.*email)/i.test(
       content,
     );
-
-  // Aggressive stage-aware paywall: step >= 10 with price + broad CTA
-  const aggressivePaywall =
-    step >= 10 &&
-    priceMatches.length >= 1 &&
-    paywallCtaCount >= 1 &&
-    /(start|subscribe|buy|continue|unlock|get access)/i.test(content);
-
-  // Late-stage soft paywall: step >= 20 with subscription keywords, no explicit price needed
-  const lateStageSoftPaywall =
-    step >= 20 &&
-    /(subscription|per month|your plan|choose your plan|unlock your plan|premium|trial)/i.test(content);
-
-  if (
-    step > 1 &&
-    ((paywallCtaCount >= 1 && (priceMatches.length >= 2 || hasPaywallText)) ||
-      aggressivePaywall ||
-      lateStageSoftPaywall)
-  ) {
-    return { type: "paywall", reason: `Found ${priceMatches.length} price(s), billing terms, and paywall CTA.` };
+  if (descriptorEmailMatches > 0 || (hasEmailTextHint && genericTextInputs >= 1)) {
+    return { type: "email", reason: "Detected email-like input hints." };
   }
 
 
