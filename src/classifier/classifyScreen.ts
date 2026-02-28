@@ -13,14 +13,24 @@ export type ScreenClassification = {
  */
 async function countOptionLikeButtons(page: Page): Promise<number> {
   const navCta = /^(accept|reject|allow|agree|cookie|close|skip|settings?|einstellung|datenschutz|terms|privacy|ablehnen|akzeptieren)/i;
+  const languageOption =
+    /^(english|espanol|español|deutsch|francais|français|italiano|portuguese|português|polski|nederlands|turkce|tuerkce|turkish|ukrainian|русский|russian)$/i;
   const buttons = page.locator("button:visible, [role='button']:visible");
   const count = await buttons.count();
   let optionCount = 0;
+  let languageCount = 0;
   for (let i = 0; i < count && i < 20; i += 1) {
     const text = (await buttons.nth(i).innerText().catch(() => "")).trim();
     if (text.length > 0 && text.length < 40 && !navCta.test(text)) {
+      if (languageOption.test(text)) {
+        languageCount += 1;
+        continue;
+      }
       optionCount += 1;
     }
+  }
+  if (languageCount >= 4 && optionCount <= 2) {
+    return 0;
   }
   return optionCount;
 }
@@ -80,14 +90,19 @@ export async function classifyScreen(page: Page, step: number): Promise<ScreenCl
     step >= 20 &&
     paywallCtaCount >= 1 &&
     /(subscription|per month|your plan|choose your plan|unlock your plan|premium|trial)/i.test(content);
+  const lateStagePriceOfferPaywall =
+    step >= 15 &&
+    priceMatches.length >= 1 &&
+    /(today|limited|offer|save|off|discount|trial|month|week|year|billed|payment|checkout|access)/i.test(content);
 
-  if (
-    step > 1 &&
-    !emailInput &&
-    ((paywallCtaCount >= 1 && (priceMatches.length >= 2 || hasPaywallText)) ||
-      aggressivePaywall ||
-      lateStageSoftPaywall)
-  ) {
+  const strongPaywallSignal =
+    aggressivePaywall ||
+    lateStageSoftPaywall ||
+    (paywallCtaCount >= 1 &&
+      (priceMatches.length >= 2 || (priceMatches.length >= 1 && hasPaywallText))) ||
+    lateStagePriceOfferPaywall;
+
+  if (step > 1 && strongPaywallSignal) {
     return { type: "paywall", reason: `Found ${priceMatches.length} price(s), billing terms, and paywall CTA.` };
   }
 
@@ -98,62 +113,12 @@ export async function classifyScreen(page: Page, step: number): Promise<ScreenCl
       reason: "Detected input[type=email].",
     };
   }
-  const genericTextInputs = await page
-    .locator('input[type="text"]:visible, input:not([type]):visible, textarea:visible')
+  const visibleEmailLikeInputs = await page
+    .locator(
+      'input[type="email"]:visible, input[name*="email" i]:visible, input[placeholder*="email" i]:visible, input[placeholder*="e-mail" i]:visible, input[aria-label*="email" i]:visible, input[autocomplete*="email" i]:visible',
+    )
     .count();
-  const descriptorEmailMatches = await page.evaluate(() => {
-    const inputs = Array.from(document.querySelectorAll("input, textarea"));
-    let matches = 0;
-    for (const element of inputs) {
-      if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) continue;
-      if (element instanceof HTMLInputElement) {
-        const type = (element.type || "").toLowerCase();
-        if (
-          [
-            "hidden",
-            "checkbox",
-            "radio",
-            "submit",
-            "button",
-            "reset",
-            "file",
-            "range",
-            "date",
-            "datetime-local",
-            "time",
-            "month",
-            "week",
-          ].includes(type)
-        ) {
-          continue;
-        }
-      }
-
-      const style = window.getComputedStyle(element);
-      if (style.visibility === "hidden" || style.display === "none") continue;
-      const rect = element.getBoundingClientRect();
-      if (rect.width < 5 || rect.height < 5) continue;
-
-      const descriptor = [
-        element.getAttribute("placeholder") ?? "",
-        element.getAttribute("name") ?? "",
-      ]
-        .join(" ")
-        .toLowerCase();
-
-      if (
-        /(e-?mail|your email|enter your email)/i.test(descriptor)
-      ) {
-        matches += 1;
-      }
-    }
-    return matches;
-  });
-  const hasEmailTextHint =
-    /(email address|e-mail address|enter your email|type your email|your email|where should we send|send.*email)/i.test(
-      content,
-    );
-  if (descriptorEmailMatches > 0 || (hasEmailTextHint && genericTextInputs >= 1)) {
+  if (visibleEmailLikeInputs > 0) {
     return { type: "email", reason: "Detected email-like input hints." };
   }
 

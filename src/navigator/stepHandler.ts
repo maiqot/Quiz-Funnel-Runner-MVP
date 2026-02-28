@@ -7,6 +7,8 @@ type ActionResult = {
   messages: string[];
 };
 
+let fallbackOptionShift = 0;
+
 async function clickLocator(locator: ReturnType<Page["locator"]>): Promise<boolean> {
   try {
     await locator.scrollIntoViewIfNeeded();
@@ -421,7 +423,7 @@ async function getOptionLabelText(
 async function clickOptionWithLabel(page: Page): Promise<{ clicked: boolean; messages: string[] }> {
   const messages: string[] = [];
   const allInputs = page.locator(
-    "input[type='radio']:visible, input[type='checkbox']:visible, [role='radio']:visible, [role='checkbox']:visible",
+    "input[type='radio'], input[type='checkbox'], [role='radio'], [role='checkbox']",
   );
   const total = await allInputs.count();
   if (total === 0) return { clicked: false, messages };
@@ -445,8 +447,13 @@ async function clickOptionWithLabel(page: Page): Promise<{ clicked: boolean; mes
   }
 
   if (chosenIndex === null && candidates.length >= 2) {
-    chosenIndex = candidates[1].index;
-    messages.push(`SMART: no keyword match, picked second option (index ${chosenIndex}).`);
+    const cap = Math.min(candidates.length, 4);
+    const rotateIndex = fallbackOptionShift % cap;
+    chosenIndex = candidates[rotateIndex].index;
+    fallbackOptionShift += 1;
+    messages.push(
+      `SMART: no keyword match, picked rotating option ${rotateIndex + 1}/${candidates.length} (index ${chosenIndex}).`,
+    );
   }
 
   if (chosenIndex === null && candidates.length >= 1) {
@@ -457,6 +464,24 @@ async function clickOptionWithLabel(page: Page): Promise<{ clicked: boolean; mes
   if (chosenIndex === null) return { clicked: false, messages };
 
   const chosen = allInputs.nth(chosenIndex);
+  const role = (await chosen.getAttribute("role").catch(() => "")) || "";
+  const inputType = (await chosen.getAttribute("type").catch(() => "")) || "";
+
+  // Prefer native checked state changes for real radio/checkbox inputs.
+  if (inputType === "radio" || inputType === "checkbox") {
+    try {
+      await chosen.check({ timeout: 2_000, force: true });
+      messages.push("Set chosen option via input.check().");
+      return { clicked: true, messages };
+    } catch {
+      // Continue with click fallbacks below.
+    }
+  } else if (role === "radio" || role === "checkbox") {
+    if (await clickLocator(chosen)) {
+      messages.push("Clicked chosen ARIA radio/checkbox control.");
+      return { clicked: true, messages };
+    }
+  }
 
   // --- Click with the same multi-strategy approach ---
   const inputId = await chosen.getAttribute("id").catch(() => null);
@@ -508,16 +533,27 @@ async function clickOptionWithLabel(page: Page): Promise<{ clicked: boolean; mes
 async function clickFirstOptionButton(page: Page): Promise<{ clicked: boolean; messages: string[] }> {
   const messages: string[] = [];
   const navCta = /^(accept|reject|allow|agree|cookie|close|skip|settings?|einstellung|datenschutz|terms|privacy|ablehnen|akzeptieren|adjust)/i;
+  const languageOption =
+    /^(english|espanol|español|deutsch|francais|français|italiano|portuguese|português|polski|nederlands|turkce|tuerkce|turkish|ukrainian|русский|russian)$/i;
   const buttons = page.locator("button:visible, [role='button']:visible");
   const count = await buttons.count();
 
   // Collect candidates (button index + text)
   const candidates: Array<{ index: number; text: string }> = [];
+  let languageOnlyCount = 0;
   for (let i = 0; i < count && i < 20; i += 1) {
     const text = (await buttons.nth(i).innerText().catch(() => "")).trim();
     if (text.length > 0 && text.length < 60 && !navCta.test(text)) {
+      if (languageOption.test(text)) {
+        languageOnlyCount += 1;
+        continue;
+      }
       candidates.push({ index: i, text });
     }
+  }
+  if (candidates.length === 0 && languageOnlyCount >= 4) {
+    messages.push("Skipped language switcher buttons; not treating as question options.");
+    return { clicked: false, messages };
   }
   if (candidates.length === 0) return { clicked: false, messages };
 
@@ -531,8 +567,13 @@ async function clickFirstOptionButton(page: Page): Promise<{ clicked: boolean; m
     }
   }
   if (!chosen && candidates.length >= 2) {
-    chosen = candidates[1];
-    messages.push(`SMART: no keyword match, picked second button: "${chosen.text.slice(0, 60)}"`);
+    const cap = Math.min(candidates.length, 4);
+    const rotateIndex = fallbackOptionShift % cap;
+    chosen = candidates[rotateIndex];
+    fallbackOptionShift += 1;
+    messages.push(
+      `SMART: no keyword match, picked rotating button ${rotateIndex + 1}/${candidates.length}: "${chosen.text.slice(0, 60)}"`,
+    );
   }
   if (!chosen) {
     chosen = candidates[0];
@@ -676,20 +717,24 @@ export async function handleStepAction(page: Page, type: ScreenType): Promise<Ac
 
   switch (type) {
     case "question": {
+      const radioOrCheckboxCount = await page
+        .locator("input[type='radio'], input[type='checkbox'], [role='radio'], [role='checkbox']")
+        .count()
+        .catch(() => 0);
       // Try radio/checkbox with label/parent click (handles both traditional and card-wrapped radios)
       const optionResult = await clickOptionWithLabel(page);
       messages.push(...optionResult.messages);
       let clickedOption = optionResult.clicked;
 
       // If no radio/checkbox, try option-like buttons (e.g. Coursiv MALE/FEMALE)
-      if (!clickedOption) {
+      if (!clickedOption && radioOrCheckboxCount === 0) {
         const btnResult = await clickFirstOptionButton(page);
         messages.push(...btnResult.messages);
         clickedOption = btnResult.clicked;
       }
 
       // If still nothing, try clickable card divs
-      if (!clickedOption) {
+      if (!clickedOption && radioOrCheckboxCount === 0) {
         const cardResult = await clickFirstOptionCard(page);
         messages.push(...cardResult.messages);
         clickedOption = cardResult.clicked;
@@ -777,35 +822,29 @@ export async function handleStepAction(page: Page, type: ScreenType): Promise<Ac
     }
 
     case "email": {
+      let emailMessages: string[] = [];
       // Guard: if no real email input exists, this is a misclassified screen (e.g. name/text field).
       // Fall through to input-like handling so the field gets filled and Next activates.
       const realEmailInput = page.locator("input[type='email']").first();
       const hasRealEmail = (await realEmailInput.count()) > 0 && (await realEmailInput.isVisible().catch(() => false));
       if (!hasRealEmail) {
-        messages.push("Email screen has no input[type=email]. Treating as input fallback.");
-        const fillMessages = await fillInputByHints(page);
-        messages.push(...fillMessages);
-        if (fillMessages.length === 0) {
-          const anyInput = page.locator(
-            "input[type='text']:visible, input:not([type]):visible",
-          ).first();
-          if ((await anyInput.count()) > 0) {
-            const bodyText = (await page.innerText("body").catch(() => "")).toLowerCase();
-            let value: string = INPUT_DEFAULTS.name;
-            if (/height|cm/i.test(bodyText)) value = INPUT_DEFAULTS.height;
-            else if (/weight/i.test(bodyText)) value = INPUT_DEFAULTS.weight;
-            else if (/age/i.test(bodyText)) value = INPUT_DEFAULTS.age;
-            await reactSafeType(anyInput, page, value);
-            messages.push(`Filled fallback field=${value}`);
-          }
+        messages.push("Email screen has no input[type=email]. Using email-like text input fallback.");
+        const emailLikeInput = page.locator(
+          "input[placeholder*='email' i]:visible, input[name*='email' i]:visible, input[aria-label*='email' i]:visible, input[type='text']:visible, input:not([type]):visible",
+        ).first();
+        if ((await emailLikeInput.count()) > 0) {
+          await reactSafeType(emailLikeInput, page, INPUT_DEFAULTS.email);
+          emailMessages.push(`Filled email=${INPUT_DEFAULTS.email} (text input fallback).`);
+          await page.keyboard.press("Tab").catch(() => undefined);
+          await page.keyboard.press("Enter").catch(() => undefined);
+        } else {
+          const fillMessages = await fillInputByHints(page);
+          messages.push(...fillMessages);
+          emailMessages.push(...fillMessages);
         }
-        await page.waitForTimeout(250);
-        const clickedContinue = await clickContinue(page);
-        if (clickedContinue) messages.push("Clicked continue/next (email→input fallback).");
-        return { performed: fillMessages.length > 0 || clickedContinue, messages };
+      } else {
+        emailMessages = await submitEmailStep(page);
       }
-
-      const emailMessages = await submitEmailStep(page);
       messages.push(...emailMessages);
 
       // Check consent/privacy checkboxes (required on many email screens).
@@ -864,7 +903,8 @@ export async function handleStepAction(page: Page, type: ScreenType): Promise<Ac
       if (clickedContinue) {
         messages.push("Clicked continue/next.");
       }
-      return { performed: clickedContinue || emailMessages.length > 0, messages };
+      const emailTransitionDetected = emailMessages.some((message) => message.includes("Transition detected"));
+      return { performed: clickedContinue || emailTransitionDetected, messages };
     }
 
     case "info": {

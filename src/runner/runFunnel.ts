@@ -125,32 +125,6 @@ export async function runFunnel(url: string): Promise<FunnelRunSummary> {
         if (step === 1 && classification.type === "paywall") {
           classification = { type: "other", reason: "Forced non-paywall on STEP 01." };
         }
-        // Protect email screens from paywall overlap on the same DOM.
-        if (classification.type === "paywall") {
-          const emailOnPage = await page.$('input[type="email"]');
-          if (emailOnPage) {
-            await logger.event("Email input detected before classification.");
-            classification = {
-              type: "email",
-              reason: "Overrode paywall: input[type=email] exists on current DOM.",
-            };
-          }
-        }
-        if (classification.type !== "email") {
-          const emailLikeCount = await page
-            .locator(
-              "input[type='email'], input[name*='email' i], input[placeholder*='email' i], input[placeholder*='e-mail' i], input[aria-label*='email' i], input[autocomplete*='email' i]",
-            )
-            .count();
-          if (emailLikeCount > 0) {
-            await logger.event("Email input detected before classification.");
-            classification = {
-              type: "email",
-              reason: "Detected email-like input descriptor on page.",
-            };
-          }
-        }
-
         console.log(`${stepLabel} type=${classification.type}`);
         const fileName = buildScreenshotFilename(step, classification.type);
         const screenshotPath = `${paths.funnelDir}/${fileName}`;
