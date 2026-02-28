@@ -125,6 +125,16 @@ export async function runFunnel(url: string): Promise<FunnelRunSummary> {
         if (step === 1 && classification.type === "paywall") {
           classification = { type: "other", reason: "Forced non-paywall on STEP 01." };
         }
+        // Safeguard: other или input + поле email в DOM → email (тип email не игнорируем)
+        const hasEmailField =
+          (await page.locator('input[type="email"]').count()) > 0 ||
+          (await page.locator('input[placeholder*="mail" i], input[name*="email" i], input[autocomplete*="email" i]').count()) > 0;
+        if (hasEmailField && (classification.type === "other" || classification.type === "input")) {
+          classification = {
+            type: "email",
+            reason: "Safeguard: overridden to email (email field in DOM).",
+          };
+        }
         console.log(`${stepLabel} type=${classification.type}`);
         const fileName = buildScreenshotFilename(step, classification.type);
         const screenshotPath = `${paths.funnelDir}/${fileName}`;

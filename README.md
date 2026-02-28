@@ -80,7 +80,7 @@ npm run dev
 
 ### С окном браузера
 
-```bash
+```bash 
 npm run dev -- https://coursiv.io/dynamic --headful
 ```
 
@@ -159,7 +159,8 @@ results/_classified/other/
 ### Чистый запуск
 
 ```bash
-rm -rf results
+rm -rf results 
+// команда удалит результаты 
 npm run dev -- https://coursiv.io/dynamic --headful
 ```
 

@@ -7,8 +7,6 @@ type ActionResult = {
   messages: string[];
 };
 
-let fallbackOptionShift = 0;
-
 async function clickLocator(locator: ReturnType<Page["locator"]>): Promise<boolean> {
   try {
     await locator.scrollIntoViewIfNeeded();
@@ -228,7 +226,7 @@ async function fillInputByHints(page: Page): Promise<string[]> {
 async function clickContinue(page: Page): Promise<boolean> {
   // Шаг 5: expanded CTA list, case-insensitive
   const texts = [
-    "continue", "next", "start", "begin", "get started", "unlock", "let's go", "go on", "submit",
+    "далее", "continue", "next", "start", "begin", "get started", "unlock", "let's go", "go on", "submit",
     "see", "get", "show", "claim", "yes",
   ];
   if (await clickByText(page, texts)) {
@@ -252,7 +250,7 @@ async function clickContinue(page: Page): Promise<boolean> {
 async function clickQuestionCta(page: Page): Promise<boolean> {
   // Шаг 5: expanded strict CTA list for question screens
   const strictTexts = [
-    "continue", "next", "see results", "get plan", "show my plan", "unlock",
+    "далее", "continue", "next", "see results", "get plan", "show my plan", "unlock",
     "start", "begin", "get started", "claim", "yes", "submit",
   ];
   if (await clickByText(page, strictTexts)) {
@@ -371,20 +369,6 @@ async function submitEmailStep(page: Page): Promise<string[]> {
   return messages;
 }
 
-const SMART_KEYWORDS = [
-  "personal",
-  "custom",
-  "plan",
-  "result",
-  "my",
-  "recommend",
-  "tailored",
-  "detailed",
-  "unlock",
-  "see",
-  "show",
-];
-
 /**
  * Retrieve the human-readable label text for a radio/checkbox input element.
  * Checks explicit <label for=id>, wrapping <label>, and closest visible text ancestor.
@@ -415,9 +399,7 @@ async function getOptionLabelText(
 }
 
 /**
- * SMART radio/checkbox click.
- *
- * Priority: smart-keyword match → second option → first option.
+ * Question: pick first answer option.
  * Clicking strategy: label[for=id] → clickable parent → input itself.
  */
 async function clickOptionWithLabel(page: Page): Promise<{ clicked: boolean; messages: string[] }> {
@@ -435,32 +417,11 @@ async function clickOptionWithLabel(page: Page): Promise<{ clicked: boolean; mes
     candidates.push({ index: i, text });
   }
 
-  // --- SMART selection ---
-  let chosenIndex: number | null = null;
-
-  for (const { index, text } of candidates) {
-    if (SMART_KEYWORDS.some((k) => text.includes(k))) {
-      chosenIndex = index;
-      messages.push(`SMART: picked option ${index} by keyword match: "${text.slice(0, 60)}"`);
-      break;
-    }
+  // Поведение: вопрос → первый вариант ответа
+  const chosenIndex = candidates.length >= 1 ? candidates[0].index : null;
+  if (chosenIndex !== null) {
+    messages.push(`Picked first option (index ${chosenIndex}).`);
   }
-
-  if (chosenIndex === null && candidates.length >= 2) {
-    const cap = Math.min(candidates.length, 4);
-    const rotateIndex = fallbackOptionShift % cap;
-    chosenIndex = candidates[rotateIndex].index;
-    fallbackOptionShift += 1;
-    messages.push(
-      `SMART: no keyword match, picked rotating option ${rotateIndex + 1}/${candidates.length} (index ${chosenIndex}).`,
-    );
-  }
-
-  if (chosenIndex === null && candidates.length >= 1) {
-    chosenIndex = candidates[0].index;
-    messages.push(`SMART: single option, picked first (index ${chosenIndex}).`);
-  }
-
   if (chosenIndex === null) return { clicked: false, messages };
 
   const chosen = allInputs.nth(chosenIndex);
@@ -526,9 +487,7 @@ async function clickOptionWithLabel(page: Page): Promise<{ clicked: boolean; mes
 }
 
 /**
- * SMART button-based question click.
- * Collects all option-like visible buttons, applies SMART_KEYWORDS selection,
- * then falls back to second → first option.
+ * Question: pick first option-like button (skip cookie/language).
  */
 async function clickFirstOptionButton(page: Page): Promise<{ clicked: boolean; messages: string[] }> {
   const messages: string[] = [];
@@ -557,28 +516,9 @@ async function clickFirstOptionButton(page: Page): Promise<{ clicked: boolean; m
   }
   if (candidates.length === 0) return { clicked: false, messages };
 
-  // SMART selection
-  let chosen: { index: number; text: string } | null = null;
-  for (const c of candidates) {
-    if (SMART_KEYWORDS.some((k) => c.text.toLowerCase().includes(k))) {
-      chosen = c;
-      messages.push(`SMART: picked button by keyword: "${c.text.slice(0, 60)}"`);
-      break;
-    }
-  }
-  if (!chosen && candidates.length >= 2) {
-    const cap = Math.min(candidates.length, 4);
-    const rotateIndex = fallbackOptionShift % cap;
-    chosen = candidates[rotateIndex];
-    fallbackOptionShift += 1;
-    messages.push(
-      `SMART: no keyword match, picked rotating button ${rotateIndex + 1}/${candidates.length}: "${chosen.text.slice(0, 60)}"`,
-    );
-  }
-  if (!chosen) {
-    chosen = candidates[0];
-    messages.push(`SMART: single candidate, picked first button: "${chosen.text.slice(0, 60)}"`);
-  }
+  // Поведение: вопрос → первый вариант ответа
+  const chosen = candidates[0];
+  messages.push(`Picked first button: "${chosen.text.slice(0, 60)}"`);
 
   if (await clickLocator(buttons.nth(chosen.index))) {
     messages.push(`Clicked option button: "${chosen.text}".`);
@@ -588,15 +528,13 @@ async function clickFirstOptionButton(page: Page): Promise<{ clicked: boolean; m
 }
 
 /**
- * SMART card-based question click.
- * Collects all visible clickable card divs, applies SMART_KEYWORDS selection,
- * then falls back to second → first card.
+ * Question: pick first clickable option card.
  */
 async function clickFirstOptionCard(page: Page): Promise<{ clicked: boolean; messages: string[] }> {
   const messages: string[] = [];
 
-  // Collect all candidate cards in-page
-  const cards = await page.evaluate((smartKeywords: string[]) => {
+  // Поведение: вопрос → первый вариант ответа (первая карточка)
+  const cards = await page.evaluate(() => {
     const seen = new Set<string>();
     const results: Array<{ text: string; index: number }> = [];
     const els = document.querySelectorAll("*");
@@ -616,20 +554,8 @@ async function clickFirstOptionCard(page: Page): Promise<{ clicked: boolean; mes
         }
       }
     }
-
-    // SMART selection
-    let chosen: { text: string; index: number } | null = null;
-    for (const c of results) {
-      if (smartKeywords.some((k) => c.text.toLowerCase().includes(k))) {
-        chosen = c;
-        break;
-      }
-    }
-    if (!chosen && results.length >= 2) chosen = results[1];
-    if (!chosen && results.length >= 1) chosen = results[0];
-    if (!chosen) return null;
-
-    // Re-find and click the element
+    if (results.length === 0) return null;
+    const chosen = results[0];
     const seenAgain = new Set<string>();
     let counter = 0;
     for (const el of Array.from(document.querySelectorAll("*"))) {
@@ -644,18 +570,17 @@ async function clickFirstOptionCard(page: Page): Promise<{ clicked: boolean; mes
           seenAgain.add(t);
           if (counter === chosen.index) {
             el.click();
-            return { text: t, smart: smartKeywords.some((k) => t.toLowerCase().includes(k)) };
+            return { text: t };
           }
           counter += 1;
         }
       }
     }
     return null;
-  }, SMART_KEYWORDS);
+  });
 
   if (cards) {
-    const label = cards.smart ? `SMART keyword match` : `fallback`;
-    messages.push(`Clicked option card (${label}): "${cards.text}".`);
+    messages.push(`Clicked first option card: "${cards.text}".`);
     return { clicked: true, messages };
   }
   return { clicked: false, messages };
@@ -665,7 +590,7 @@ async function clickOtherCta(page: Page): Promise<{ performed: boolean; messages
   const messages: string[] = [];
   // Шаг 5: expanded CTA list for other-type screens
   const ctaTexts = [
-    "start", "continue", "next", "begin", "get started", "unlock", "let's go", "go on",
+    "далее", "start", "continue", "next", "begin", "get started", "unlock", "let's go", "go on",
     "see", "get", "show", "claim", "yes", "submit",
   ];
   const clickedByText = await clickByText(page, ctaTexts);

@@ -63,8 +63,7 @@ async function countClickableOptionCards(page: Page): Promise<number> {
 export async function classifyScreen(page: Page, step: number): Promise<ScreenClassification> {
   const content = (await page.content()).toLowerCase();
 
-  // --- Paywall: broader pricing heuristic + purchase CTA ---
-  const emailInput = await page.$('input[type="email"]');
+  // ========== 1. PAYWALL (first, do not change logic) ==========
   const priceMatches = content.match(/(\$|€|£|usd|eur)\s*\d+/gi) ?? [];
   const paywallKeywords =
     /(subscribe|buy now|purchase|continue to payment|start my plan|get my plan|unlock|try now|start plan|see your plan|show my plan|get plan|get access)/i;
@@ -76,16 +75,11 @@ export async function classifyScreen(page: Page, step: number): Promise<ScreenCl
     /(subscription|per\s*month|your plan|unlock your plan|choose your plan|personalized plan|show my plan|see your plan|get your plan|premium|trial)/i.test(
       content,
     );
-
-  // Aggressive stage-aware paywall: step >= 10 with price + broad CTA
   const aggressivePaywall =
     step >= 10 &&
     priceMatches.length >= 1 &&
     paywallCtaCount >= 1 &&
     /(start|subscribe|buy|continue|unlock|get access)/i.test(content);
-
-  // Late-stage soft paywall: step >= 20 with subscription keywords AND at least one paywall CTA.
-  // Requires paywallCtaCount >= 1 to avoid false positives on "building your plan" info screens.
   const lateStageSoftPaywall =
     step >= 20 &&
     paywallCtaCount >= 1 &&
@@ -94,7 +88,6 @@ export async function classifyScreen(page: Page, step: number): Promise<ScreenCl
     step >= 15 &&
     priceMatches.length >= 1 &&
     /(today|limited|offer|save|off|discount|trial|month|week|year|billed|payment|checkout|access)/i.test(content);
-
   const strongPaywallSignal =
     aggressivePaywall ||
     lateStageSoftPaywall ||
@@ -106,60 +99,58 @@ export async function classifyScreen(page: Page, step: number): Promise<ScreenCl
     return { type: "paywall", reason: `Found ${priceMatches.length} price(s), billing terms, and paywall CTA.` };
   }
 
-  // --- Email: check after paywall, but before generic input ---
-  if (emailInput) {
-    return {
-      type: "email",
-      reason: "Detected input[type=email].",
-    };
+  // ========== 2. EMAIL (before input; even if price on page, email input = email) ==========
+  const hasEmailType = (await page.locator('input[type="email"]').count()) > 0;
+  const hasEmailAutocomplete = (await page.locator('input[autocomplete*="email" i]').count()) > 0;
+  const hasEmailName = (await page.locator('input[name*="email" i]').count()) > 0;
+  const hasEmailPlaceholder = (await page.locator('input[placeholder*="mail" i]').count()) > 0;
+  if (hasEmailType) {
+    return { type: "email", reason: "Detected input[type=email]." };
   }
-  const visibleEmailLikeInputs = await page
-    .locator(
-      'input[type="email"]:visible, input[name*="email" i]:visible, input[placeholder*="email" i]:visible, input[placeholder*="e-mail" i]:visible, input[aria-label*="email" i]:visible, input[autocomplete*="email" i]:visible',
-    )
-    .count();
-  if (visibleEmailLikeInputs > 0) {
-    return { type: "email", reason: "Detected email-like input hints." };
+  if (hasEmailAutocomplete) {
+    return { type: "email", reason: "Detected input[autocomplete*='email']." };
+  }
+  if (hasEmailName) {
+    return { type: "email", reason: "Detected input[name*='email']." };
+  }
+  if (hasEmailPlaceholder) {
+    return { type: "email", reason: "Detected input[placeholder*='mail']." };
   }
 
+  // ========== Radio/checkbox count: input must not override question ==========
+  const radioCount = await page.locator('input[type="radio"], [role="radio"]').count();
+  const checkboxCount = await page.locator('input[type="checkbox"], [role="checkbox"]').count();
+  const hasRadioOrCheckbox = radioCount >= 1 || checkboxCount >= 1;
 
-  // --- Profile data inputs ---
+  // ========== 3. INPUT (≥1 text/number, no radio/checkbox, no paywall) ==========
   const inputCount = await page.locator('input[type="text"]:visible, input[type="number"]:visible').count();
   const profileHintInputs = await page
     .locator("input[placeholder*='height' i], input[placeholder*='weight' i], input[placeholder*='age' i], input[placeholder*='name' i]")
     .count();
-  if (inputCount >= 2 || profileHintInputs >= 1) {
-    return { type: "input", reason: "Found form fields for profile data." };
+  const bodyText = (await page.innerText("body").catch(() => "")).replace(/\s+/g, " ").trim();
+  const inputKeywords = /(your height|your weight|your age|how old|how tall|what.*height|what.*weight|enter your name|your name)/i;
+  if (!hasRadioOrCheckbox && (inputCount >= 1 || profileHintInputs >= 1)) {
+    return { type: "input", reason: "Found form fields for profile/data (no radio/checkbox)." };
+  }
+  if (!hasRadioOrCheckbox && inputKeywords.test(bodyText)) {
+    return { type: "input", reason: "Body text mentions profile data input (height/weight/age/name)." };
   }
 
-  // --- Traditional radio/checkbox question ---
-  const radioCount = await page.locator('input[type="radio"], [role="radio"]').count();
-  const checkboxCount = await page.locator('input[type="checkbox"], [role="checkbox"]').count();
+  // ========== 4. QUESTION (radio/checkbox, then buttons, then cards) ==========
   const optionsCount = radioCount + checkboxCount;
   if (radioCount >= 2 || checkboxCount >= 2 || optionsCount >= 2) {
     return { type: "question", reason: `Found ${optionsCount} radio/checkbox options.` };
   }
-
-  // --- Button-based question (e.g. Coursiv: MALE / FEMALE buttons) ---
   const optionButtons = await countOptionLikeButtons(page);
   if (optionButtons >= 2) {
     return { type: "question", reason: `Found ${optionButtons} option-like buttons (no radio/checkbox).` };
   }
-
-  // --- Card-based question (divs with cursor:pointer, short text) ---
   const optionCards = await countClickableOptionCards(page);
   if (optionCards >= 2) {
     return { type: "question", reason: `Found ${optionCards} clickable option cards.` };
   }
 
-  // --- Custom input screen: body text mentions height/weight/age/name with a next button ---
-  const bodyText = (await page.innerText("body").catch(() => "")).replace(/\s+/g, " ").trim();
-  const inputKeywords = /(your height|your weight|your age|how old|how tall|what.*height|what.*weight|enter your name|your name)/i;
-  if (inputKeywords.test(bodyText)) {
-    return { type: "input", reason: "Body text mentions profile data input (height/weight/age/name)." };
-  }
-
-  // --- Info screen: text + single CTA ---
+  // ========== 5. INFO (text + single CTA, no inputs/options) ==========
   const hasAnyInput =
     (await page.locator("input:visible, textarea:visible, select:visible").count().catch(() => 0)) > 0;
   const ctaCount = await page.locator("button:visible, [role='button']:visible").count();
@@ -167,5 +158,6 @@ export async function classifyScreen(page: Page, step: number): Promise<ScreenCl
     return { type: "info", reason: "Text screen with exactly one CTA button and no inputs/options." };
   }
 
+  // ========== 6. OTHER ==========
   return { type: "other", reason: "No MVP heuristic matched." };
 }
