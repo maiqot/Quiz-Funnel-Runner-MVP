@@ -147,6 +147,31 @@ async function closeCommonPopups(page: Page): Promise<string[]> {
   return messages;
 }
 
+/**
+ * React-compatible value setter: uses the native HTMLInputElement.prototype.value
+ * descriptor so React's synthetic event system picks up the change.
+ */
+async function reactSafeType(
+  input: ReturnType<Page["locator"]>,
+  page: Page,
+  value: string,
+): Promise<void> {
+  await input.click().catch(() => {});
+  await input.fill("").catch(() => {});
+  await page.keyboard.type(value, { delay: 30 });
+  await input.evaluate((el, v) => {
+    if (!(el instanceof HTMLInputElement)) return;
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    if (nativeSetter) nativeSetter.call(el, v);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+  await page.waitForTimeout(150);
+}
+
 async function fillInputByHints(page: Page): Promise<string[]> {
   const messages: string[] = [];
   const mapping: Array<{ hints: RegExp; value: string; label: string }> = [
@@ -156,16 +181,19 @@ async function fillInputByHints(page: Page): Promise<string[]> {
     { hints: /(age|years old|yo)/i, value: INPUT_DEFAULTS.age, label: "age" },
   ];
 
-  const inputs = page.locator("input[type='text'], input[type='number'], input:not([type])");
+  const inputs = page.locator(
+    "input[type='text']:visible, input[type='number']:visible, input:not([type]):visible, textarea:visible",
+  );
   const count = await inputs.count();
-  const orderedFallbackValues = [INPUT_DEFAULTS.name, INPUT_DEFAULTS.height, INPUT_DEFAULTS.weight, INPUT_DEFAULTS.age];
-  let fallbackIndex = 0;
 
   for (let index = 0; index < count; index += 1) {
     const input = inputs.nth(index);
-    if (!(await input.isVisible())) {
-      continue;
-    }
+
+    const isDisabled = await input.evaluate((el) => {
+      if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return true;
+      return el.disabled || el.readOnly;
+    }).catch(() => true);
+    if (isDisabled) continue;
 
     const placeholder = (await input.getAttribute("placeholder")) ?? "";
     const name = (await input.getAttribute("name")) ?? "";
@@ -174,23 +202,22 @@ async function fillInputByHints(page: Page): Promise<string[]> {
     const descriptor = `${placeholder} ${name} ${id} ${ariaLabel}`;
 
     const matched = mapping.find((item) => item.hints.test(descriptor));
-    const value = matched?.value ?? orderedFallbackValues[Math.min(fallbackIndex, orderedFallbackValues.length - 1)];
-    fallbackIndex += 1;
+
+    let value: string;
+    if (matched) {
+      value = matched.value;
+    } else {
+      const bodyText = (await page.innerText("body").catch(() => "")).toLowerCase();
+      if (/height|how tall/i.test(bodyText)) value = INPUT_DEFAULTS.height;
+      else if (/weight/i.test(bodyText)) value = INPUT_DEFAULTS.weight;
+      else if (/age|how old/i.test(bodyText)) value = INPUT_DEFAULTS.age;
+      else if (/name/i.test(bodyText)) value = INPUT_DEFAULTS.name;
+      else value = "1";
+    }
 
     await input.scrollIntoViewIfNeeded();
-    try {
-      await input.fill(value);
-    } catch {
-      // input[type=number] on some browsers rejects fill() — use JS assignment
-      await input.evaluate((el, v) => {
-        if (el instanceof HTMLInputElement) {
-          el.value = v;
-          el.dispatchEvent(new Event("input", { bubbles: true }));
-          el.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-      }, value);
-    }
-    messages.push(`Filled ${matched?.label ?? "text"}=${value}`);
+    await reactSafeType(input, page, value);
+    messages.push(`Filled ${matched?.label ?? "field"}=${value}`);
   }
 
   return messages;
@@ -686,42 +713,63 @@ export async function handleStepAction(page: Page, type: ScreenType): Promise<Ac
     }
 
     case "input": {
+      messages.push("Input screen detected. Filling fields.");
       const fillMessages = await fillInputByHints(page);
       messages.push(...fillMessages);
 
-      // If no standard inputs were filled, try typing into custom input widgets
       if (fillMessages.length === 0) {
         const bodyText = (await page.innerText("body").catch(() => "")).toLowerCase();
-        let value: string = INPUT_DEFAULTS.name;
+        let value = "1";
         if (/height|cm|how tall/i.test(bodyText)) value = INPUT_DEFAULTS.height;
         else if (/weight|kg|lbs/i.test(bodyText)) value = INPUT_DEFAULTS.weight;
         else if (/age|how old|years/i.test(bodyText)) value = INPUT_DEFAULTS.age;
+        else if (/name/i.test(bodyText)) value = INPUT_DEFAULTS.name;
 
-        // Try any visible input-like element
-        const anyInput = page.locator("input:visible").first();
+        const anyInput = page.locator(
+          "input[type='text']:visible, input[type='number']:visible, input:not([type]):visible",
+        ).first();
         if ((await anyInput.count()) > 0) {
-          try {
-            await anyInput.scrollIntoViewIfNeeded();
-            await anyInput.fill(value);
-            messages.push(`Filled custom input with ${value}.`);
-          } catch {
-            // Try click + keyboard type as last resort
-            try {
-              await anyInput.click();
-              await page.keyboard.type(value, { delay: 50 });
-              messages.push(`Typed ${value} into custom input.`);
-            } catch {
-              messages.push("Could not fill custom input.");
+          await reactSafeType(anyInput, page, value);
+          messages.push(`Filled fallback input=${value}`);
+        } else {
+          // No real input on page — treat as info/other and just click CTA
+          messages.push("No input fields found. Treating as info screen.");
+          const clickedContinue = await clickContinue(page);
+          if (clickedContinue) {
+            messages.push("Clicked continue/next (no-input fallback).");
+          } else {
+            // Try any visible button as last resort
+            const fallback = await clickFirstVisible(page, ["button:visible", "[role='button']:visible"]);
+            if (fallback) {
+              messages.push("Clicked fallback button (no-input screen).");
+            } else {
+              await page.waitForTimeout(10_000);
+              messages.push("Waited 10s for animated transition (no inputs, no CTA).");
             }
           }
-        } else {
-          // No input at all — try keyboard typing directly (some custom widgets accept keyboard)
-          await page.keyboard.type(value, { delay: 50 });
-          messages.push(`Typed ${value} via keyboard (no input found).`);
+          return { performed: true, messages };
         }
       }
 
-      const clickedContinue = await clickContinue(page);
+      messages.push("Input filled. Attempting continue.");
+      await page.waitForTimeout(250);
+
+      let clickedContinue = await clickContinue(page);
+      if (!clickedContinue) {
+        const allInputs = page.locator(
+          "input[type='text']:visible, input[type='number']:visible, input:not([type]):visible",
+        );
+        const inputCount = await allInputs.count();
+        for (let i = 0; i < inputCount; i += 1) {
+          await allInputs.nth(i).dispatchEvent("input").catch(() => {});
+          await allInputs.nth(i).dispatchEvent("change").catch(() => {});
+        }
+        await page.waitForTimeout(150);
+        clickedContinue = await clickContinue(page);
+        if (!clickedContinue) {
+          messages.push("Continue button still disabled after fill.");
+        }
+      }
       if (clickedContinue) {
         messages.push("Clicked continue/next.");
       }
