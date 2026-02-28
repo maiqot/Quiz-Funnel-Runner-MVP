@@ -777,6 +777,34 @@ export async function handleStepAction(page: Page, type: ScreenType): Promise<Ac
     }
 
     case "email": {
+      // Guard: if no real email input exists, this is a misclassified screen (e.g. name/text field).
+      // Fall through to input-like handling so the field gets filled and Next activates.
+      const realEmailInput = page.locator("input[type='email']").first();
+      const hasRealEmail = (await realEmailInput.count()) > 0 && (await realEmailInput.isVisible().catch(() => false));
+      if (!hasRealEmail) {
+        messages.push("Email screen has no input[type=email]. Treating as input fallback.");
+        const fillMessages = await fillInputByHints(page);
+        messages.push(...fillMessages);
+        if (fillMessages.length === 0) {
+          const anyInput = page.locator(
+            "input[type='text']:visible, input:not([type]):visible",
+          ).first();
+          if ((await anyInput.count()) > 0) {
+            const bodyText = (await page.innerText("body").catch(() => "")).toLowerCase();
+            let value: string = INPUT_DEFAULTS.name;
+            if (/height|cm/i.test(bodyText)) value = INPUT_DEFAULTS.height;
+            else if (/weight/i.test(bodyText)) value = INPUT_DEFAULTS.weight;
+            else if (/age/i.test(bodyText)) value = INPUT_DEFAULTS.age;
+            await reactSafeType(anyInput, page, value);
+            messages.push(`Filled fallback field=${value}`);
+          }
+        }
+        await page.waitForTimeout(250);
+        const clickedContinue = await clickContinue(page);
+        if (clickedContinue) messages.push("Clicked continue/next (email→input fallback).");
+        return { performed: fillMessages.length > 0 || clickedContinue, messages };
+      }
+
       const emailMessages = await submitEmailStep(page);
       messages.push(...emailMessages);
 

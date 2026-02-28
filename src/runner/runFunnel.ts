@@ -102,8 +102,12 @@ export async function runFunnel(url: string): Promise<FunnelRunSummary> {
     let previousHash = "";
     let sameHashCount = 0;
     let noActionCount = 0;
+    let emailReached = false;
 
-    for (let step = 1; step <= RUN_CONFIG.maxSteps; step += 1) {
+    for (let step = 1; step <= RUN_CONFIG.maxSteps + 15; step += 1) {
+      // Hard limit: 60 steps before email, 75 steps after email reaches
+      if (!emailReached && step > RUN_CONFIG.maxSteps) break;
+      if (emailReached && step > RUN_CONFIG.maxSteps + 15) break;
       const stepLabel = `[${paths.slug}] STEP ${String(step).padStart(2, "0")}`;
       if (page.isClosed()) {
         console.log(`${stepLabel} page closed externally, stop.`);
@@ -156,6 +160,9 @@ export async function runFunnel(url: string): Promise<FunnelRunSummary> {
         await copyToClassified(classification.type, screenshotPath, classifiedFileName);
         totalSteps += 1;
         detectedTypes.add(classification.type);
+        if (classification.type === "email") {
+          emailReached = true;
+        }
 
         stepMessages.push(`Classifier: ${classification.reason}`, `Saved screenshot: ${fileName}`);
 

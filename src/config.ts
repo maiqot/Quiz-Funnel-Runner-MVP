@@ -7,7 +7,7 @@ export const FUNNEL_URLS: string[] = [
 ]; // Можно добавить сразу несколько ссылок для тестирования в кавычках через запятую
 
 export const RUN_CONFIG = {
-  maxSteps: 40,
+  maxSteps: 60,
   sameDomHashLimit: 12,
   actionRetryCount: 1,
   defaultTimeoutMs: 20_000,
